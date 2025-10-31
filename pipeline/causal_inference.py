@@ -285,7 +285,11 @@ class CausalInferencePipeline(torch.nn.Module):
             kv_cache_size = self.local_attn_size * self.frame_seq_length
         else:
             # Use the default KV cache size
-            kv_cache_size = 32760
+            kv_cache_size = 1560*3*self.generator.num_blocks
+            # instead of 32760if local_attn_size == -1 else local_attn_size * 1560
+            # [1, 21, 16, 60, 104] that's 7 chunks of 3 frames each, which maps to a KV cache size of 1x32760x12x128 for num_blocks = 7
+            # ok so there are 21 latent frames in total --> 32760/21 = 1560 patches per frame --> patch size = 2x2? 
+            # (60*104 / 4) = 1560
 
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append({

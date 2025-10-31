@@ -63,7 +63,8 @@ class CausalWanSelfAttention(nn.Module):
                  local_attn_size=-1,
                  sink_size=0,
                  qk_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 num_blocks=7):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -73,7 +74,12 @@ class CausalWanSelfAttention(nn.Module):
         self.sink_size = sink_size
         self.qk_norm = qk_norm
         self.eps = eps
-        self.max_attention_size = 32760 if local_attn_size == -1 else local_attn_size * 1560
+        self.num_blocks = num_blocks
+        #self.max_attention_size = 32760 if local_attn_size == -1 else local_attn_size * 1560
+        self.max_attention_size = 1560*3*num_blocks if local_attn_size == -1 else local_attn_size * 1560
+        #Chris: [1, 21, 16, 60, 104] that's 7 chunks of 3 frames each, which maps to a KV cache size of 1x32760x12x128 
+        #Chris: ok so there are 21 latent frames in total --> 32760/21 = 1560 patches per frame --> patch size = 2x2? 
+        #Chris: (60*104 / 4) = 1560
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -251,7 +257,8 @@ class CausalWanAttentionBlock(nn.Module):
                  sink_size=0,
                  qk_norm=True,
                  cross_attn_norm=False,
-                 eps=1e-6):
+                 eps=1e-6,
+                 num_blocks=7):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -260,10 +267,10 @@ class CausalWanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
-
+        self.num_blocks = num_blocks
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = CausalWanSelfAttention(dim, num_heads, local_attn_size, sink_size, qk_norm, eps)
+        self.self_attn = CausalWanSelfAttention(dim, num_heads, local_attn_size, sink_size, qk_norm, eps, num_blocks)
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
@@ -394,7 +401,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                  sink_size=0,
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6, 
+                 num_blocks=7):
         r"""
         Initialize the diffusion model backbone.
 
@@ -437,7 +445,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         assert model_type in ['t2v', 'i2v']
         self.model_type = model_type
-
+        self.num_blocks = num_blocks
         self.patch_size = patch_size
         self.text_len = text_len
         self.in_dim = in_dim
@@ -469,7 +477,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                                    local_attn_size, sink_size, qk_norm, cross_attn_norm, eps)
+                                    local_attn_size, sink_size, qk_norm, cross_attn_norm, eps, num_blocks)
             for _ in range(num_layers)
         ])
 

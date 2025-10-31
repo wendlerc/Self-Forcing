@@ -10,9 +10,10 @@ from wan.modules.vae import _video_vae
 from wan.modules.t5 import umt5_xxl
 from wan.modules.causal_model import CausalWanModel
 
+import os 
 
 class WanTextEncoder(torch.nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, dir='.') -> None:
         super().__init__()
 
         self.text_encoder = umt5_xxl(
@@ -22,12 +23,12 @@ class WanTextEncoder(torch.nn.Module):
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
         self.text_encoder.load_state_dict(
-            torch.load("wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth",
+            torch.load(os.path.join(dir, "wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth"),
                        map_location='cpu', weights_only=False)
         )
 
         self.tokenizer = HuggingfaceTokenizer(
-            name="wan_models/Wan2.1-T2V-1.3B/google/umt5-xxl/", seq_len=512, clean='whitespace')
+            name=os.path.join(dir, "wan_models/Wan2.1-T2V-1.3B/google/umt5-xxl/"), seq_len=512, clean='whitespace')
 
     @property
     def device(self):
@@ -119,15 +120,17 @@ class WanDiffusionWrapper(torch.nn.Module):
             timestep_shift=8.0,
             is_causal=False,
             local_attn_size=-1,
-            sink_size=0
+            sink_size=0,
+            dir='.',
+            num_blocks=7,
     ):
         super().__init__()
 
         if is_causal:
             self.model = CausalWanModel.from_pretrained(
-                f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
+                os.path.join(dir, f"wan_models/{model_name}/"), local_attn_size=local_attn_size, sink_size=sink_size)
         else:
-            self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
+            self.model = WanModel.from_pretrained(os.path.join(dir, f"wan_models/{model_name}/"))
         self.model.eval()
 
         # For non-causal diffusion, all frames share the same timestep
@@ -137,8 +140,8 @@ class WanDiffusionWrapper(torch.nn.Module):
             shift=timestep_shift, sigma_min=0.0, extra_one_step=True
         )
         self.scheduler.set_timesteps(1000, training=True)
-
-        self.seq_len = 32760  # [1, 21, 16, 60, 104]
+        self.num_blocks = num_blocks
+        self.seq_len = 1560*3*num_blocks # = 32760 for 7 blocks corresponding to [1, 21, 16, 60, 104]; each frame becomes 1560 patches 21*1560 = 32760.
         self.post_init()
 
     def enable_gradient_checkpointing(self) -> None:
