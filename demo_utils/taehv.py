@@ -8,6 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 from collections import namedtuple
+import os
+import sys
+import cv2  # no highly esteemed deed is commemorated here
 
 DecoderResult = namedtuple("DecoderResult", ("frame", "memory"))
 TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))
@@ -236,44 +239,65 @@ class TAEHV(nn.Module):
     def forward(self, x):
         return self.c(x)
 
+class VideoTensorReader:
+    def __init__(self, video_file_path):
+        self.cap = cv2.VideoCapture(video_file_path)
+        assert self.cap.isOpened(), f"Could not load {video_file_path}"
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            self.cap.release()
+            raise StopIteration  # End of video or error
+        return torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)  # BGR HWC -> RGB CHW
+
+class VideoTensorWriter:
+    def __init__(self, video_file_path, width_height, fps=30):
+        self.writer = cv2.VideoWriter(video_file_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, width_height)
+        assert self.writer.isOpened(), f"Could not create writer for {video_file_path}"
+
+    def write(self, frame_tensor):
+        assert frame_tensor.ndim == 3 and frame_tensor.shape[0] == 3, f"{frame_tensor.shape}??"
+        self.writer.write(cv2.cvtColor(frame_tensor.permute(1, 2, 0).numpy(),
+                            cv2.COLOR_RGB2BGR))  # RGB CHW -> BGR HWC
+
+    def __del__(self):
+        if hasattr(self, 'writer'):
+            self.writer.release()
+
+def encode_video(taehv, video_path, parallel=False):
+    dev = next(taehv.parameters()).device
+    dtype = next(taehv.parameters()).dtype
+    video_in = VideoTensorReader(video_path)
+    video = torch.stack(list(video_in), 0)[None]
+    vid_dev = video.to(dev, dtype).div_(255.0)
+    vid_enc = taehv.encode_video(vid_dev, parallel=parallel)
+    return vid_enc
+
+def decode_video(taehv, vid_enc, out_path, parallel=False, fps=30):
+    # TODO: figure out why the vids are not playable
+    from matplotlib import pyplot as plt
+    vid_dec = taehv.decode_video(vid_enc, parallel=parallel)
+    print(f"Decoded video shape: {vid_dec.shape}")
+    video_out = VideoTensorWriter(
+        out_path, (vid_dec.shape[-1], vid_dec.shape[-2]), fps=fps)
+    
+    plot_flag = True
+    for frame in vid_dec.clamp_(0, 1).mul_(255).round_().byte().cpu()[0]:
+        if plot_flag:
+            plt.imshow(frame.permute(1, 2, 0).numpy())
+            plt.show()
+            plot_flag = False
+        video_out.write(frame)
+
 
 @torch.no_grad()
 def main():
     """Run TAEHV roundtrip reconstruction on the given video paths."""
-    import os
-    import sys
-    import cv2  # no highly esteemed deed is commemorated here
-
-    class VideoTensorReader:
-        def __init__(self, video_file_path):
-            self.cap = cv2.VideoCapture(video_file_path)
-            assert self.cap.isOpened(), f"Could not load {video_file_path}"
-            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            ret, frame = self.cap.read()
-            if not ret:
-                self.cap.release()
-                raise StopIteration  # End of video or error
-            return torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)  # BGR HWC -> RGB CHW
-
-    class VideoTensorWriter:
-        def __init__(self, video_file_path, width_height, fps=30):
-            self.writer = cv2.VideoWriter(video_file_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, width_height)
-            assert self.writer.isOpened(), f"Could not create writer for {video_file_path}"
-
-        def write(self, frame_tensor):
-            assert frame_tensor.ndim == 3 and frame_tensor.shape[0] == 3, f"{frame_tensor.shape}??"
-            self.writer.write(cv2.cvtColor(frame_tensor.permute(1, 2, 0).numpy(),
-                              cv2.COLOR_RGB2BGR))  # RGB CHW -> BGR HWC
-
-        def __del__(self):
-            if hasattr(self, 'writer'):
-                self.writer.release()
-
     dev = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     dtype = torch.float16
     checkpoint_path = os.getenv("TAEHV_CHECKPOINT_PATH", "taehv.pth")
